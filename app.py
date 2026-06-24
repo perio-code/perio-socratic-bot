@@ -2,7 +2,7 @@ import streamlit as st
 import anthropic
 
 # 1. Page Configuration
-st.set_page_config(page_title="Periodontal Case Simulator", page_icon="🦷", layout="wide")
+st.set_page_config(page_title="Periodontal Patient Reviewer", page_icon="🦷", layout="wide")
 
 # 2. Initialize Anthropic Client
 if "ANTHROPIC_API_KEY" in st.secrets:
@@ -26,7 +26,7 @@ with st.sidebar:
 
 # 5. Main Chat Interface
 st.title("🦷 Socratic Periodontal Instructor")
-st.markdown("Welcome to the clinic floor. Review the patient clipboard, then discuss your assessment, Lindhe's criteria, and your proposed restorative sequence with your attending.")
+st.markdown("Welcome to the clinic floor. Review the patient clipboard, then discuss your periodontal diagnosis, prognosis and treatment plan.")
 
 # Display chat messages from history on app rerun
 for message in st.session_state.messages:
