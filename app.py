@@ -232,7 +232,7 @@ def main():
     # Initialize conversation with the faculty's opening greeting
     if "messages" not in st.session_state:
         opening_line = (
-            "Welcome to the clinic, Doctor. Let's look at your case. "
+            "Welcome to the clinic. Let's look at your case. "
             "Please present your patient: chief complaint and medical history, "
             "maximum probing depths (PD) and clinical attachment loss (CAL), "
             "furcation involvement and mobility, and radiographic bone loss (RBL)."
