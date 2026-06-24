@@ -26,7 +26,7 @@ with st.sidebar:
 
 # 5. Main Chat Interface
 st.title("🦷 Socratic Periodontal Instructor")
-st.markdown("Welcome to the clinic floor. Review the patient clipboard, then discuss your periodontal diagnosis, prognosis and treatment plan.")
+st.markdown("Welcome to the clinic floor. Review your patient's clipboard, then discuss their periodontal diagnosis, prognosis and treatment plan.")
 
 # Display chat messages from history on app rerun
 for message in st.session_state.messages:
