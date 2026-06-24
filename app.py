@@ -30,6 +30,7 @@ Deploy on Streamlit Community Cloud:
 
 import base64
 import os
+import re
 
 import streamlit as st
 from anthropic import Anthropic
@@ -93,6 +94,12 @@ Phase 5: Treatment Sequencing & Wrap-up
 
 TONE AND STYLE:
 Maintain a rigorous, academic, encouraging, yet highly precise clinical tone. Speak as a senior colleague guiding a junior colleague. Never give answers away—always make the student do the cognitive work.
+
+CLINICAL IMAGES (PERIODONTAL CHARTING / RADIOGRAPHS):
+The student may attach images of full-mouth periodontal charting and/or radiographs. When images are present, do NOT diagnose or interpret them for the student. Instead, ask the student to read out the relevant findings themselves first (e.g., "Looking at the chart you've attached, what are the deepest probing depths you see, and where?"). Use the images only to verify or gently challenge the student's own stated interpretation — for example, if their stated PD doesn't match what you can see, ask a guiding question that sends them back to look again, rather than correcting them directly.
+
+PHASE TRACKING (REQUIRED, MACHINE-READABLE TAG):
+At the very end of every single response, on its own new line, output a machine-readable tag indicating which phase of the workflow this response belongs to, in the exact format: [PHASE:N] where N is 1, 2, 3, 4, or 5, corresponding to the five phases above. This tag is for the clinic's progress-tracking software and is stripped before the student sees your message — it does not break character and is not visible to the student, so always include it, exactly once, at the very end.
 """
 
 
@@ -127,13 +134,99 @@ def get_openai_client():
 
 def get_faculty_response(client, messages):
     """Send the conversation so far to Claude and return the faculty's reply."""
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
-        messages=messages,
-    )
-    return response.content[0].text
+    try:
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            system=SYSTEM_PROMPT,
+            messages=messages,
+        )
+        return response.content[0].text
+    except Exception as e:
+        st.error(
+            f"The faculty AI couldn't respond — there may be an issue with your "
+            f"ANTHROPIC_API_KEY or the API request. Details: {e}"
+        )
+        st.stop()
+
+
+def encode_image_for_claude(uploaded_file):
+    """
+    Converts a Streamlit UploadedFile (image) into an Anthropic API
+    image content block. Returns None for unsupported types (e.g. PDFs
+    are handled separately as document blocks).
+    """
+    mime = uploaded_file.type or "image/png"
+    if mime not in ("image/png", "image/jpeg", "image/webp", "image/gif"):
+        return None
+    uploaded_file.seek(0)
+    data = base64.b64encode(uploaded_file.read()).decode()
+    return {
+        "type": "image",
+        "source": {"type": "base64", "media_type": mime, "data": data},
+    }
+
+
+def encode_pdf_for_claude(uploaded_file):
+    """Converts a Streamlit UploadedFile (PDF) into an Anthropic document block."""
+    uploaded_file.seek(0)
+    data = base64.b64encode(uploaded_file.read()).decode()
+    return {
+        "type": "document",
+        "source": {"type": "base64", "media_type": "application/pdf", "data": data},
+    }
+
+
+def build_user_content(text, uploaded_files):
+    """
+    Builds the multi-part content list for a user turn: any attached
+    images/PDFs first, then the text. Returns a plain string instead of
+    a list when there are no attachments, since the API/UI is simpler
+    that way and history stays readable.
+    """
+    if not uploaded_files:
+        return text
+
+    content = []
+    for f in uploaded_files:
+        if f.type == "application/pdf":
+            content.append(encode_pdf_for_claude(f))
+        else:
+            block = encode_image_for_claude(f)
+            if block:
+                content.append(block)
+    content.append({"type": "text", "text": text})
+    return content
+
+
+def render_user_message(text, uploaded_files):
+    """What gets shown in the chat bubble for a user turn with attachments."""
+    if uploaded_files:
+        names = ", ".join(f.name for f in uploaded_files)
+        return f"📎 *Attached: {names}*\n\n{text}"
+    return text
+
+
+def extract_phase_tag(text):
+    """
+    Pulls the trailing [PHASE:N] tag off a faculty reply.
+    Returns (clean_text, phase_int_or_None).
+    """
+    match = re.search(r"\[PHASE:\s*([1-5])\s*\]\s*$", text.strip())
+    if not match:
+        return text, None
+    phase = int(match.group(1))
+    clean_text = text[: match.start()].rstrip()
+    return clean_text, phase
+
+
+PHASE_LABELS = {
+    1: "Case Entry",
+    2: "Diagnosis (Staging & Grading)",
+    3: "Tooth-by-Tooth Prognosis",
+    4: "Referral Decision",
+    5: "Treatment Sequencing & Wrap-up",
+}
 
 
 # =========================================================================
@@ -192,10 +285,10 @@ def speak(text, openai_client):
     if openai_client is not None:
         audio_bytes = synthesize_speech_openai(openai_client, text)
         if audio_bytes:
-            st.components.v1.html(autoplay_audio_html(audio_bytes), height=0)
+            st.iframe(autoplay_audio_html(audio_bytes), height=1)
             return
     # Fallback to free browser speech synthesis
-    st.components.v1.html(browser_tts_html(text), height=0)
+    st.iframe(browser_tts_html(text), height=1)
 
 
 # =========================================================================
@@ -214,6 +307,25 @@ def main():
     anthropic_client = get_anthropic_client()
     openai_client = get_openai_client()
 
+    # ---------------------------------------------------------------
+    # Session state init
+    # ---------------------------------------------------------------
+    if "messages" not in st.session_state:
+        opening_line = (
+            "Welcome to the clinic, Doctor. Let's look at your case. "
+            "Please present your patient: chief complaint and medical history, "
+            "maximum probing depths (PD) and clinical attachment loss (CAL), "
+            "furcation involvement and mobility, and radiographic bone loss (RBL)."
+        )
+        st.session_state.messages = [{"role": "assistant", "content": opening_line}]
+        st.session_state.display_messages = [{"role": "assistant", "content": opening_line}]
+        st.session_state.spoken_count = 0
+        st.session_state.current_phase = 1
+        st.session_state.intake_data = None
+
+    # ---------------------------------------------------------------
+    # Sidebar: settings + phase checklist
+    # ---------------------------------------------------------------
     with st.sidebar:
         st.header("Settings")
         voice_enabled = st.toggle("🔊 Read faculty responses aloud", value=True)
@@ -229,48 +341,123 @@ def main():
             st.session_state.clear()
             st.rerun()
 
-    # Initialize conversation with the faculty's opening greeting
-    if "messages" not in st.session_state:
-        opening_line = (
-            "Welcome to the clinic. Let's look at your case. "
-            "Please present your patient: chief complaint and medical history, "
-            "maximum probing depths (PD) and clinical attachment loss (CAL), "
-            "furcation involvement and mobility, and radiographic bone loss (RBL)."
-        )
-        st.session_state.messages = [{"role": "assistant", "content": opening_line}]
-        st.session_state.spoken_count = 0  # tracks which assistant turns have been spoken
+        st.divider()
+        st.header("Case Checklist")
+        current = st.session_state.current_phase
+        for n, label in PHASE_LABELS.items():
+            if n < current:
+                st.markdown(f"✅ ~~Phase {n}: {label}~~")
+            elif n == current:
+                st.markdown(f"▶️ **Phase {n}: {label}**")
+            else:
+                st.markdown(f"⬜ Phase {n}: {label}")
 
-    # Render chat history
-    for msg in st.session_state.messages:
+    # ---------------------------------------------------------------
+    # Structured intake form (optional — student can use this instead
+    # of free-typing the initial case data)
+    # ---------------------------------------------------------------
+    if st.session_state.current_phase == 1 and st.session_state.intake_data is None:
+        with st.expander("📋 Structured Patient Intake Form (optional)", expanded=False):
+            with st.form("intake_form"):
+                st.markdown("**Chief Complaint / Medical History**")
+                chief_complaint = st.text_area("Chief complaint & relevant medical history", height=80)
+                col1, col2 = st.columns(2)
+                with col1:
+                    max_pd = st.text_input("Max Probing Depths (PD)", placeholder="e.g. 7mm, #3 & #14 mesial")
+                    furcation = st.text_input("Furcation involvement", placeholder="e.g. Class II, #14 buccal")
+                    smoking = st.text_input("Smoking history", placeholder="e.g. 15 cig/day x 10 yrs")
+                with col2:
+                    max_cal = st.text_input("Max Clinical Attachment Loss (CAL)", placeholder="e.g. 6mm")
+                    mobility = st.text_input("Mobility", placeholder="e.g. Grade 2, #14")
+                    hba1c = st.text_input("HbA1c / systemic modifiers", placeholder="e.g. HbA1c 7.2%")
+                rbl = st.text_area("Radiographic Bone Loss (RBL)", height=60, placeholder="e.g. 30% generalized horizontal, vertical defect #14 distal")
+
+                submitted = st.form_submit_button("Submit intake to faculty")
+                if submitted:
+                    intake_text = (
+                        "Here is my structured patient intake:\n\n"
+                        f"- **Chief Complaint / Medical History:** {chief_complaint or 'N/A'}\n"
+                        f"- **Max PD:** {max_pd or 'N/A'}\n"
+                        f"- **Max CAL:** {max_cal or 'N/A'}\n"
+                        f"- **Furcation:** {furcation or 'N/A'}\n"
+                        f"- **Mobility:** {mobility or 'N/A'}\n"
+                        f"- **Smoking history:** {smoking or 'N/A'}\n"
+                        f"- **HbA1c / systemic modifiers:** {hba1c or 'N/A'}\n"
+                        f"- **Radiographic Bone Loss (RBL):** {rbl or 'N/A'}"
+                    )
+                    st.session_state.intake_data = intake_text
+                    st.session_state._pending_submit = intake_text
+                    st.rerun()
+
+    # ---------------------------------------------------------------
+    # File upload: periodontal charting + radiographs
+    # ---------------------------------------------------------------
+    with st.expander("📎 Attach periodontal charting / x-rays", expanded=False):
+        uploaded_files = st.file_uploader(
+            "Upload full-mouth periodontal charting and/or radiographs",
+            type=["png", "jpg", "jpeg", "webp", "pdf"],
+            accept_multiple_files=True,
+            help="Images (PNG/JPG/WEBP) are read directly by the faculty AI. "
+                 "PDFs (e.g. exported perio charts) are also supported.",
+        )
+        if uploaded_files:
+            st.caption(f"{len(uploaded_files)} file(s) ready to attach to your next message.")
+
+    # ---------------------------------------------------------------
+    # Render chat history (display version — text only, no raw image blocks)
+    # ---------------------------------------------------------------
+    for msg in st.session_state.display_messages:
         with st.chat_message(msg["role"], avatar="🦷" if msg["role"] == "assistant" else "🧑‍⚕️"):
             st.markdown(msg["content"])
 
-    # Speak any not-yet-spoken assistant messages (handles the opening line + new replies)
-    assistant_msgs = [m for m in st.session_state.messages if m["role"] == "assistant"]
+    # Speak any not-yet-spoken assistant messages
+    assistant_msgs = [m for m in st.session_state.display_messages if m["role"] == "assistant"]
     if voice_enabled and st.session_state.spoken_count < len(assistant_msgs):
         for m in assistant_msgs[st.session_state.spoken_count:]:
             speak(m["content"], openai_client)
         st.session_state.spoken_count = len(assistant_msgs)
 
+    # ---------------------------------------------------------------
+    # Handle a pending submission from the intake form
+    # ---------------------------------------------------------------
+    pending_text = st.session_state.pop("_pending_submit", None)
+
     # Chat input
     user_input = st.chat_input("Present your case findings or respond to the question above...")
-    if user_input:
-        st.session_state.messages.append({"role": "user", "content": user_input})
+
+    final_input = pending_text or user_input
+    if final_input:
+        files_for_this_turn = uploaded_files if (user_input and uploaded_files) else None
+
+        api_content = build_user_content(final_input, files_for_this_turn)
+        display_text = render_user_message(final_input, files_for_this_turn)
+
+        st.session_state.messages.append({"role": "user", "content": api_content})
+        st.session_state.display_messages.append({"role": "user", "content": display_text})
+
         with st.chat_message("user", avatar="🧑‍⚕️"):
-            st.markdown(user_input)
+            st.markdown(display_text)
 
         with st.chat_message("assistant", avatar="🦷"):
             with st.spinner("Faculty is reviewing your response..."):
-                reply = get_faculty_response(anthropic_client, st.session_state.messages)
-            st.markdown(reply)
+                raw_reply = get_faculty_response(anthropic_client, st.session_state.messages)
+            clean_reply, phase = extract_phase_tag(raw_reply)
+            st.markdown(clean_reply)
 
-        st.session_state.messages.append({"role": "assistant", "content": reply})
+        # Keep the raw (tagged) reply in API history so Claude sees its own
+        # prior phase tags for continuity; show the clean version to the user.
+        st.session_state.messages.append({"role": "assistant", "content": raw_reply})
+        st.session_state.display_messages.append({"role": "assistant", "content": clean_reply})
+
+        if phase:
+            st.session_state.current_phase = phase
 
         if voice_enabled:
-            speak(reply, openai_client)
+            speak(clean_reply, openai_client)
         st.session_state.spoken_count = len(
-            [m for m in st.session_state.messages if m["role"] == "assistant"]
+            [m for m in st.session_state.display_messages if m["role"] == "assistant"]
         )
+        st.rerun()
 
 
 if __name__ == "__main__":
