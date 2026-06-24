@@ -1,0 +1,203 @@
+import streamlit as st
+from anthropic import Anthropic
+import os
+
+# Set page configuration for a professional dental clinic aesthetic
+st.set_page_config(
+    page_title="Periodontal & Restorative Socratic Simulator",
+    page_icon="🦷",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS to style the clinic environment nicely
+st.markdown("""
+    <style>
+    .reportview-container {
+        background: #f0f2f6
+    }
+    .main {
+        background-color: #ffffff;
+    }
+    div[data-testid="stSidebar"] {
+        background-color: #f8f9fa;
+        border-right: 1px solid #e9ecef;
+    }
+    .stButton>button {
+        width: 100%;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# This is the master "brain" prompt we co-designed. It locks Claude into the Socratic faculty persona.
+SYSTEM_INSTRUCTIONS = """
+ROLE AND CONTEXT:
+You are an expert, warm, encouraging, and highly supportive Dental School Faculty Instructor specializing in Periodontics and Comprehensive Restorative Dentistry. Your goal is to guide a dental student through a comprehensive case analysis using friendly, conversational Socratic questioning. Act as a collaborative mentor on the clinic floor. Help students discover evidence-based conclusions regarding periodontal health, referral necessity, and comprehensive restorative sequencing. Never sound accusatory or aggressive. Use encouraging phrases like "Let's look closer together," "Good catch," or "Let's map this out phase-by-phase."
+
+EVIDENCE-BASED CLINICAL CRITERIA:
+Hold the student accountable to these specific foundational standards in a helpful, educational manner:
+1. Systemic & Medication Links: Identify drug-induced gingival enlargement (e.g., Nifedipine, Cyclosporine, Phenytoin) and systemic modifiers (Diabetes HbA1c, smoking).
+2. 2017 AAP/EFP Classification (Tonetti et al. 2018): Staging and Grading based on six-site charting and radiographs.
+3. Critical Probing Depths (Lindhe, Badersten, & Egelberg 1982):
+   - Mechanical therapy (SRP) in shallow sites (< 2.9mm) causes clinical attachment loss, while deeper sites (> 2.9mm) show attachment gain.
+   - Surgical therapy only shows a greater attachment gain than non-surgical therapy in deep sites (typically > 5.5mm).
+4. Restorative/Abutment Viability (McGuire & Nunn 1996; Kwok & Caton 2007): Evaluating if a tooth has a stable enough periodontal prognosis to serve as a restorative foundation or bridge abutment.
+5. AAP Guidelines for Periodontal Referral:
+   - Level 1 (Referral indicated): Stage III/IV, aggressive disease, Class II/III furcations, vertical bone defects, or uncontrolled systemic modifiers (e.g., HbA1c > 8%, smoking > 10 cigarettes/day).
+   - Post-Phase I Referral: Persistent Probing Depths (PD) >= 6mm with active Bleeding on Probing (BOP) at any of the six sites per tooth during the 4–6 week re-evaluation, especially where surgical depth thresholds apply.
+   - Level 2/3 (Manageable in student clinic): Stage I/II, gingivitis, probing depths <= 5mm with no complex anatomy.
+
+SOCRATIC OPERATIONAL WORKFLOW (ONE GENTLE STEP AT A TIME):
+Ask only one question at a time. Do not move to the next phase until the current phase is accurately completed. Do not overwhelm the student with too many instructions at once.
+
+Phase 1: Warm Welcome & Chief Complaint Focus
+- Greet the student with an encouraging, welcoming tone: "Welcome to the clinic, Doctor! It's great to have you here today. Let's walk through this patient's case together and see what we've got. To kick things off, let's start with just the patient's Chief Complaint and basic Medical History. What brought them in today, and is there anything notable in their health background?"
+- After they provide the Chief Complaint, thank them and explicitly prompt for the next single piece of information—the full six-site charting: "Perfect, thank you. Now, let's layer in the Periodontal Charting numbers. To get an accurate picture, could you give me the full six-site probing depth breakdown (MB, B, DB, ML, L, DL) for the most severely involved teeth or quadrants?"
+- Continue pacing step-by-step to gather Radiographic Bone Loss (RBL) before moving to the diagnosis.
+
+Phase 2: Guided Diagnosis (Staging & Grading)
+- Ask warmly: "Based on the great data you just put together, how would you classify this case using our 2017 AAP guidelines for Stage, Grade, and Extent?"
+- Gentle Correction Rule: If they make a mistake, say: "You're definitely on the right track looking at Stage II. Let's peek back at the six-site charting you mentioned, though—with those 6mm depths on the distobuccal of the molars, does that complexity factor push us into a different stage? What do you think?"
+
+Phase 3: Tooth-by-Tooth Prognosis & Treatment Logic (The Lindhe Checkpoint)
+- Prompt them gently regarding tooth predictability and treatment thresholds: "Let's narrow our focus to individual teeth, especially those molars. Before we discuss a referral, let's look at your treatment approach. For the sites that are only 2mm or 3mm, what does Lindhe's classic 1982 study on 'Critical Probing Depths' tell us about aggressively scaling those shallow pockets? What should our goal be for those vs the deeper sites?"
+
+Phase 4: The Supportive Referral Discussion (Post-SRP Thresholds)
+- Ask the critical question: "Looking at the whole clinical picture we've built, do you feel this is a case we can safely manage here in our undergraduate student clinic, or would this patient benefit from a referral to a periodontist? How does the periodontal literature guide your decision here?"
+- Gentle Re-evaluation Timeline Probe (Enforcing Six Sites & Lindhe Surgical Thresholds): If the case proceeds to Phase I, simulate the 4–6 week re-evaluation milestone: "Great job on the scaling and root planing. Let's fast forward 5 weeks to the re-evaluation. While the straight buccal and lingual sites responded beautifully and dropped to 3mm, we still have persistent 6mm pockets with bleeding on probing on the distobuccal and mesiolingual sites of the upper molars. Thinking back to Lindhe's critical probing depth threshold for surgical therapy, are these deep, non-responding interproximal sites something we should attempt to treat surgically in an undergraduate clinic, or is it time to collaborate with a periodontist? Why?"
+
+Phase 5: The Comprehensive Restorative Plan
+- Once the periodontal foundation is stabilized, guide them into the restorative phase: "Now that our periodontal foundation is stable, let's look at the restorative needs (caries, missing teeth, broken restorations). What is your sequence for a comprehensive restorative plan? Specifically, look at the teeth you chose as bridge abutments or crown candidates—does their periodontal prognosis support long-term restorative loading, or do we need to alter our design?"
+
+Phase 6: Supportive Wrap-up
+- Validate their comprehensive thinking across both disciplines, summarize the key takeaways, and give them an enthusiastic clinical sign-off.
+
+CONVERSATION PACE AND PROGRESSION RULES:
+1. Prevent Stalling: If a student says "I don't know," gives a one-word answer, or seems stuck, do not leave them stranded. Provide a warm, helpful hint to nudge them along.
+2. Explicit Hand-Offs: Always close your turn with a single, clear, unambiguous question so the student knows exactly what their next task is.
+"""
+
+# Setup session state to preserve the chat thread across browser refreshes
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Fetch the secret API key from Streamlit's secure vault
+api_key = st.secrets.get("ANTHROPIC_API_KEY", None)
+
+client = None
+if api_key:
+    client = Anthropic(api_key=api_key)
+
+# Left Column / Sidebar: Represents the clinical workstation clipboard
+with st.sidebar:
+    st.image("https://images.unsplash.com/photo-1629909613654-28e377c37b09?auto=format&fit=crop&q=80&w=400", use_container_width=True)
+    st.title("🦷 Patient Digital Chart")
+    st.markdown("Use this panel to organize your patient's clinical records before presenting the case to the faculty member.")
+    
+    st.header("📋 Clinical Documentation Intake")
+    
+    # Text input fields simulating standard clinical chart files
+    med_history = st.text_area("Medical History & Medications", 
+        placeholder="e.g., Patient is a 52yo male with Type II Diabetes (HbA1c 8.2%). Takes Nifedipine for hypertension. No allergies.",
+        height=100)
+    
+    six_site_charting = st.text_area("Six-Site Perio Charting Notes",
+        placeholder="e.g., Maxillary Molars: MB: 5mm, B: 3mm, DB: 6mm, ML: 4mm, L: 3mm, DL: 6mm with BOP.",
+        height=100)
+        
+    rad_findings = st.text_area("Radiographic Readings (FMX)",
+        placeholder="e.g., General horizontal bone loss in coronal third. Angular defect visible on mesial of tooth #19 extending to mid-root.",
+        height=100)
+    
+    # Structured files uploaders (Simulating student uploading PDFs or JPGs of radiographs)
+    st.markdown("---")
+    st.subheader("📎 Clinical Attachments")
+    uploaded_charting = st.file_uploader("Upload Periodontal Charting Sheet", type=["pdf", "png", "jpg", "jpeg"])
+    uploaded_xrays = st.file_uploader("Upload Radiographs (FMX / Periapicals)", type=["png", "jpg", "jpeg"])
+
+    # Helpful academic cheat sheet to prevent student stalling
+    with st.expander("📘 Foundational Reference Cheat Sheet"):
+        st.markdown("""
+        **1. 2017 AAP Classification**
+        - *Staging:* Severity based on CAL and RBL (Stage I to IV).
+        - *Grading:* Speed of progression (Grade A, B, C) modified by Smoking & Diabetes.
+        
+        **2. Lindhe et al. 1982 Critical Depths**
+        - Shallow pocket threshold: 2.9mm (don't scale).
+        - Surgical access threshold: 5.5mm.
+        
+        **3. AAP Referral Thresholds**
+        - Immediate specialty care: Stage III/IV, Class II/III furcation, vertical defects, uncontrolled systemic risks.
+        """)
+
+# Right Column: The interactive clinical hallway consultation with Faculty
+st.title("🦷 Clinical Chairside Consultation")
+st.markdown("Interact with the Periodontal Faculty Instructor below to present your patient and formulate your treatment sequence.")
+
+# Check if the API key is configured correctly before starting
+if not api_key:
+    st.warning("⚠️ Welcome! To start consulting with the Socratic Faculty member, please configure your `ANTHROPIC_API_KEY` in the Streamlit Cloud dashboard settings under 'Secrets'.")
+    st.info("💡 Once you paste your key there, this warning will disappear, and the Socratic Instructor will greet you.")
+else:
+    # Display previous chat messages
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # If the conversation is brand new, let the Faculty member initiate the greet
+    if len(st.session_state.messages) == 0:
+        initial_greeting = "Welcome to the clinic, Doctor! It's great to have you here today. Let's walk through this patient's case together and see what we've got. To kick things off, let's start with just the patient's Chief Complaint and basic Medical History. What brought them in today, and is there anything notable in their health background?"
+        st.session_state.messages.append({"role": "assistant", "content": initial_greeting})
+        with st.chat_message("assistant"):
+            st.markdown(initial_greeting)
+
+    # Handle the student sending a chat message
+    if user_prompt := st.chat_input("Type your response to the instructor here..."):
+        # Append student message to display
+        st.session_state.messages.append({"role": "user", "content": user_prompt})
+        with st.chat_message("user"):
+            st.markdown(user_prompt)
+
+        # Build context if the student has entered notes in the sidebar clipboard
+        clipboard_context = ""
+        if med_history or six_site_charting or rad_findings:
+            clipboard_context = f"\n[STUDENT CLINICAL CLIPBOARD UPDATE]:\n- Medical History Notes: {med_history}\n- 6-Site Charting: {six_site_charting}\n- X-ray Readings: {rad_findings}"
+            if uploaded_charting:
+                clipboard_context += f"\n- Charting Document Uploaded: {uploaded_charting.name}"
+            if uploaded_xrays:
+                clipboard_context += f"\n- Radiographs Uploaded: {uploaded_xrays.name}"
+
+        # Combine chat history for Claude context
+        formatted_messages = []
+        for msg in st.session_state.messages:
+            # Format role to match Anthropic's expected schema ('user' or 'assistant')
+            formatted_messages.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+            
+        # Append the clipboard state to the latest user message so Claude is aware of changes
+        if clipboard_context:
+            formatted_messages[-1]["content"] += clipboard_context
+
+        # Query Claude 3.5 Sonnet to respond
+        with st.chat_message("assistant"):
+            response_placeholder = st.empty()
+            try:
+                # Use stream to make the Socratic professor respond fluidly
+                with client.messages.stream(
+                    model="claude-3-5-sonnet-20241022",
+                    max_tokens=1000,
+                    system=SYSTEM_INSTRUCTIONS,
+                    messages=formatted_messages
+                ) as stream:
+                    complete_response = ""
+                    for text in stream.text_stream:
+                        complete_response += text
+                        response_placeholder.markdown(complete_response)
+                
+                # Save response to history
+                st.session_state.messages.append({"role": "assistant", "content": complete_response})
+                
+            except Exception as e:
+                st.error(f"An error occurred connecting to Claude: {str(e)}")
