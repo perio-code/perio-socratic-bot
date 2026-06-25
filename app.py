@@ -1,4 +1,3 @@
-
 """
 Perio Socratic Faculty App
 ---------------------------
@@ -57,6 +56,11 @@ MAX_TOKENS = 1024
 OPENAI_TTS_VOICE = "onyx"
 OPENAI_TTS_MODEL = "tts-1"  # use "tts-1-hd" for higher quality, slower/pricier
 
+# PIN to unlock the Instructor View in the sidebar. Change this, or better,
+# set it via Streamlit Secrets as INSTRUCTOR_PIN so it isn't hardcoded in
+# source control. Falls back to this default only if no secret is set.
+DEFAULT_INSTRUCTOR_PIN = "1234"
+
 SYSTEM_PROMPT = """IMPORTANT DISCLAIMER (ALWAYS IN EFFECT):
 This is an educational simulation only, designed to help dental students practice diagnostic reasoning. You are not providing real medical or dental advice, diagnosis, or treatment for any actual patient. If the student indicates at any point that the "case" is in fact a real, current patient of theirs, gently remind them that this tool is for educational practice only and that any real patient must be managed by a licensed clinician using their own independent clinical judgment — then continue the Socratic exercise as a hypothetical/practice case if they wish to proceed.
 
@@ -106,6 +110,38 @@ PHASE TRACKING (REQUIRED, MACHINE-READABLE TAG):
 At the very end of every single response, on its own new line, output a machine-readable tag indicating which phase of the workflow this response belongs to, in the exact format: [PHASE:N] where N is 1, 2, 3, 4, or 5, corresponding to the five phases above. This tag is for the clinic's progress-tracking software and is stripped before the student sees your message — it does not break character and is not visible to the student, so always include it, exactly once, at the very end.
 """
 
+INSTRUCTOR_SUMMARY_PROMPT = """You are a teaching-assistant analytics engine for a dental school's periodontal Socratic-case simulator. You are NOT the faculty persona the student talked to — you are a separate, candid evaluator producing a private report for the supervising instructor only. The student will never see this report.
+
+You will be given the full transcript of a Socratic dialogue between a dental student and an AI faculty member. Your job is to assess the STUDENT's performance and engagement — not to grade the AI faculty member.
+
+Evaluate:
+1. **Engagement status** — is the student actively engaging with the clinical reasoning task, or are they off-task (e.g., one-word non-answers, irrelevant tangents, trying to get the AI to just give them the answer, repeated stalling)?
+2. **Comprehension status** — are they correctly applying the literature (2017 World Workshop Classification, McGuire & Nunn / Kwok & Caton prognosis criteria, Segelnick & Weinberg re-evaluation timeline, AAP referral guidelines), or do they show repeated/significant misunderstanding even after Socratic correction?
+3. **Specific strengths** — what did the student get right or reason through well?
+4. **Specific gaps** — what concepts did they struggle with, get wrong, or need to be redirected on? Be concrete (cite the actual exchange if possible).
+5. **Overall status** — choose exactly one: "ON_TRACK", "NEEDS_HELP", or "OFF_TASK".
+   - ON_TRACK: actively engaged, reasoning soundly, minor or no corrections needed.
+   - NEEDS_HELP: engaged and trying, but showing real conceptual gaps or repeated errors on key literature/criteria even after Socratic prompting.
+   - OFF_TASK: not meaningfully engaging with the clinical task (non-answers, derailing, refusing to engage, trying to bypass the exercise).
+
+Respond ONLY in the following format, with no preamble or extra commentary:
+
+STATUS: <ON_TRACK | NEEDS_HELP | OFF_TASK>
+ENGAGEMENT: <1-2 sentences>
+COMPREHENSION: <1-2 sentences>
+STRENGTHS: <1-2 sentences, or "None observed yet" if too early to tell>
+GAPS: <1-2 sentences, or "None observed yet" if too early to tell>
+RECOMMENDATION: <1-2 sentences of concrete next-step advice for the instructor>
+
+If the transcript is too short to assess meaningfully (e.g., only the opening greeting with no student response yet), respond with exactly:
+STATUS: INSUFFICIENT_DATA
+ENGAGEMENT: Not enough conversation yet to assess.
+COMPREHENSION: Not enough conversation yet to assess.
+STRENGTHS: None observed yet.
+GAPS: None observed yet.
+RECOMMENDATION: Check back after the student has responded to at least one or two faculty questions.
+"""
+
 
 # =========================================================================
 # API CLIENTS
@@ -132,6 +168,13 @@ def get_openai_client():
     return OpenAI(api_key=api_key)
 
 
+def get_instructor_pin():
+    """Returns the configured instructor PIN (secrets/env override the default)."""
+    return st.secrets.get(
+        "INSTRUCTOR_PIN", os.environ.get("INSTRUCTOR_PIN", DEFAULT_INSTRUCTOR_PIN)
+    )
+
+
 # =========================================================================
 # CLAUDE CALL
 # =========================================================================
@@ -152,6 +195,68 @@ def get_faculty_response(client, messages):
             f"ANTHROPIC_API_KEY or the API request. Details: {e}"
         )
         st.stop()
+
+
+def get_instructor_summary(client, messages):
+    """
+    Sends the full conversation (including any attached images/PDFs, for
+    full context) to Claude under a separate evaluator system prompt and
+    returns the raw structured assessment text. Strips the trailing
+    [PHASE:N] tags from prior assistant turns first, since those are
+    irrelevant noise for the evaluator.
+    """
+    cleaned_messages = []
+    for m in messages:
+        if m["role"] == "assistant" and isinstance(m["content"], str):
+            clean_text, _ = extract_phase_tag(m["content"])
+            cleaned_messages.append({"role": "assistant", "content": clean_text})
+        else:
+            cleaned_messages.append(m)
+
+    # Wrap the transcript as a single evaluation request so it's clearly
+    # distinguished from "continue the roleplay."
+    eval_request = {
+        "role": "user",
+        "content": (
+            "Here is the full transcript above between the student and the "
+            "AI faculty persona. Please produce your private instructor "
+            "assessment now, following the required format exactly."
+        ),
+    }
+
+    try:
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=600,
+            system=INSTRUCTOR_SUMMARY_PROMPT,
+            messages=cleaned_messages + [eval_request],
+        )
+        return response.content[0].text
+    except Exception as e:
+        return f"STATUS: ERROR\nCould not generate summary: {e}"
+
+
+def parse_instructor_summary(raw_text):
+    """Parses the structured STATUS/ENGAGEMENT/etc. fields into a dict."""
+    fields = ["STATUS", "ENGAGEMENT", "COMPREHENSION", "STRENGTHS", "GAPS", "RECOMMENDATION"]
+    result = {f: "" for f in fields}
+    pattern = "|".join(fields)
+    matches = list(re.finditer(rf"({pattern}):\s*", raw_text))
+    for i, m in enumerate(matches):
+        key = m.group(1)
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw_text)
+        result[key] = raw_text[start:end].strip()
+    return result
+
+
+STATUS_DISPLAY = {
+    "ON_TRACK": ("🟢", "On Track"),
+    "NEEDS_HELP": ("🟡", "Needs Help"),
+    "OFF_TASK": ("🔴", "Off Task"),
+    "INSUFFICIENT_DATA": ("⚪", "Not Enough Data Yet"),
+    "ERROR": ("⚠️", "Error Generating Summary"),
+}
 
 
 def encode_image_for_claude(uploaded_file):
@@ -336,6 +441,8 @@ def main():
         st.session_state.spoken_count = 0
         st.session_state.current_phase = 1
         st.session_state.intake_data = None
+        st.session_state.instructor_unlocked = False
+        st.session_state.instructor_summary = None
 
     # ---------------------------------------------------------------
     # Sidebar: settings + phase checklist
@@ -365,6 +472,43 @@ def main():
                 st.markdown(f"▶️ **Phase {n}: {label}**")
             else:
                 st.markdown(f"⬜ Phase {n}: {label}")
+
+        st.divider()
+        with st.expander("🔒 Instructor View"):
+            if not st.session_state.instructor_unlocked:
+                pin_input = st.text_input("Enter instructor PIN", type="password", key="pin_input")
+                if st.button("Unlock"):
+                    if pin_input == get_instructor_pin():
+                        st.session_state.instructor_unlocked = True
+                        st.rerun()
+                    else:
+                        st.error("Incorrect PIN.")
+            else:
+                student_turns = [m for m in st.session_state.display_messages if m["role"] == "user"]
+                if not student_turns:
+                    st.caption("Student hasn't responded yet — check back after they engage with the case.")
+                else:
+                    if st.button("🔍 Generate progress summary"):
+                        with st.spinner("Analyzing transcript..."):
+                            raw_summary = get_instructor_summary(anthropic_client, st.session_state.messages)
+                        st.session_state.instructor_summary = parse_instructor_summary(raw_summary)
+
+                    if st.session_state.instructor_summary:
+                        s = st.session_state.instructor_summary
+                        emoji, label = STATUS_DISPLAY.get(s.get("STATUS", ""), ("⚪", "Unknown"))
+                        st.markdown(f"### {emoji} {label}")
+                        st.markdown(f"**Engagement:** {s.get('ENGAGEMENT', '—')}")
+                        st.markdown(f"**Comprehension:** {s.get('COMPREHENSION', '—')}")
+                        st.markdown(f"**Strengths:** {s.get('STRENGTHS', '—')}")
+                        st.markdown(f"**Gaps:** {s.get('GAPS', '—')}")
+                        st.markdown(f"**Recommendation:** {s.get('RECOMMENDATION', '—')}")
+                    else:
+                        st.caption("Click the button above to generate a private assessment of this student's performance so far.")
+
+                if st.button("Lock instructor view"):
+                    st.session_state.instructor_unlocked = False
+                    st.session_state.instructor_summary = None
+                    st.rerun()
 
     # ---------------------------------------------------------------
     # Structured intake form (optional — student can use this instead
