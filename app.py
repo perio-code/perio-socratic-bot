@@ -429,6 +429,12 @@ def main():
     # ---------------------------------------------------------------
     # Session state init
     # ---------------------------------------------------------------
+    # Each key is initialized independently with setdefault, rather than
+    # gated behind a single "if 'messages' not in state" check. This makes
+    # the app resilient to stale sessions left over from an older deployed
+    # version of this code (e.g. right after you push an update that adds
+    # new session keys) — every key gets created if missing, even if some
+    # other keys already existed from before.
     if "messages" not in st.session_state:
         opening_line = (
             "Welcome to the clinic, Doctor. Let's look at your case. "
@@ -438,11 +444,12 @@ def main():
         )
         st.session_state.messages = [{"role": "assistant", "content": opening_line}]
         st.session_state.display_messages = [{"role": "assistant", "content": opening_line}]
-        st.session_state.spoken_count = 0
-        st.session_state.current_phase = 1
-        st.session_state.intake_data = None
-        st.session_state.instructor_unlocked = False
-        st.session_state.instructor_summary = None
+
+    st.session_state.setdefault("spoken_count", 0)
+    st.session_state.setdefault("current_phase", 1)
+    st.session_state.setdefault("intake_data", None)
+    st.session_state.setdefault("instructor_unlocked", False)
+    st.session_state.setdefault("instructor_summary", None)
 
     # ---------------------------------------------------------------
     # Sidebar: settings + phase checklist
