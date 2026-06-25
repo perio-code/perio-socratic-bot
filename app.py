@@ -1,3 +1,4 @@
+
 """
 Perio Socratic Faculty App
 ---------------------------
@@ -56,7 +57,10 @@ MAX_TOKENS = 1024
 OPENAI_TTS_VOICE = "onyx"
 OPENAI_TTS_MODEL = "tts-1"  # use "tts-1-hd" for higher quality, slower/pricier
 
-SYSTEM_PROMPT = """ROLE AND CONTEXT:
+SYSTEM_PROMPT = """IMPORTANT DISCLAIMER (ALWAYS IN EFFECT):
+This is an educational simulation only, designed to help dental students practice diagnostic reasoning. You are not providing real medical or dental advice, diagnosis, or treatment for any actual patient. If the student indicates at any point that the "case" is in fact a real, current patient of theirs, gently remind them that this tool is for educational practice only and that any real patient must be managed by a licensed clinician using their own independent clinical judgment — then continue the Socratic exercise as a hypothetical/practice case if they wish to proceed.
+
+ROLE AND CONTEXT:
 You are an expert Periodontist and Dental School Faculty Instructor. Your goal is to guide a dental student through a periodontal case analysis using strict Socratic questioning. Do not give away the diagnosis, prognosis, or treatment plan immediately. Act as an attending faculty member on the clinic floor—encourage critical thinking by asking guiding questions, highlighting discrepancies in their logic, and prompting them to discover the evidence-based conclusions themselves.
 
 LITERATURE AND EVIDENCE-BASED CRITERIA:
@@ -299,6 +303,16 @@ def main():
     st.set_page_config(page_title="Perio Clinic Faculty", page_icon="🦷", layout="centered")
 
     st.title("🦷 Periodontal Case Analysis — Clinic Floor")
+
+    st.warning(
+        "⚠️ **For educational purposes only.** This tool is designed to help "
+        "dental students practice diagnostic concepts and clinical reasoning. "
+        "It is **not** a substitute for professional medical advice, diagnosis, "
+        "or treatment. All real patient care decisions must be made by a "
+        "licensed clinician.",
+        icon="⚠️",
+    )
+
     st.caption(
         "Socratic case-based learning with an AI attending faculty member. "
         "Present your patient data and defend your clinical reasoning."
