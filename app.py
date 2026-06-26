@@ -407,7 +407,7 @@ def speak(text, openai_client):
 def main():
     st.set_page_config(page_title="Perio Clinic Faculty", page_icon="🦷", layout="centered")
 
-    st.title("🦷 Periodontal Case Analysis")
+    st.title("🦷 Periodontal Case Analysis ")
 
     st.warning(
         "⚠️ **For educational purposes only.** This tool is designed to help "
