@@ -725,8 +725,6 @@ def main():
     st.set_page_config(page_title="Perio Clinic Faculty", page_icon="🦷", layout="centered")
 
     st.title("🦷 Periodontal Case Analysis")
-    if st.session_state.get("student_name"):
-        st.markdown(f"**Student:** {st.session_state.student_name}")
 
     st.warning(
         "⚠️ **For educational purposes only.** This tool is designed to help "
@@ -763,34 +761,9 @@ def main():
     st.session_state.setdefault("intake_data", None)
     st.session_state.setdefault("instructor_unlocked", False)
     st.session_state.setdefault("instructor_summary", None)
-    st.session_state.setdefault("student_name", None)
-    st.session_state.setdefault("session_start_email_sent", False)
-    st.session_state.setdefault("case_submitted", False)
-    st.session_state.setdefault("strike_count", 0)       # wrong/incomplete answers in current phase
-    st.session_state.setdefault("lifeline_options", None) # MC options currently shown
+    st.session_state.setdefault("strike_count", 0)
+    st.session_state.setdefault("lifeline_options", None)
     st.session_state.setdefault("session_start_time", datetime.now().isoformat())
-
-    # ---------------------------------------------------------------
-    # Student name capture — shown once at the very start
-    # ---------------------------------------------------------------
-    if not st.session_state.student_name:
-        st.subheader("Before we begin")
-        st.markdown("Please enter your name so your instructor can identify your session.")
-        with st.form("name_form"):
-            name_input = st.text_input("Your full name", placeholder="e.g. Jane Smith")
-            start = st.form_submit_button("Start case session")
-            if start:
-                if name_input.strip():
-                    st.session_state.student_name = name_input.strip()
-                    st.rerun()
-                else:
-                    st.error("Please enter your name to continue.")
-        st.stop()
-
-    # Send session-start email once, the first time we have a student name
-    if st.session_state.student_name and not st.session_state.session_start_email_sent:
-        send_session_start_email(st.session_state.student_name)
-        st.session_state.session_start_email_sent = True
 
     # ---------------------------------------------------------------
     # Sidebar: settings + phase checklist
@@ -1040,36 +1013,20 @@ def main():
         st.rerun()
 
     # ---------------------------------------------------------------
-    # Submit & Finish — generates summary and emails instructor
+    # Submit & Finish
     # ---------------------------------------------------------------
     st.divider()
-    if not st.session_state.case_submitted:
-        student_turns = [m for m in st.session_state.display_messages if m["role"] == "user"]
-        if student_turns:
-            if st.button("✅ Submit & finish case", type="primary"):
-                with st.spinner("Generating your performance summary and notifying instructor..."):
-                    raw_summary = get_instructor_summary(
-                        anthropic_client, st.session_state.messages
-                    )
-                    summary = parse_instructor_summary(raw_summary)
-                    transcript = build_plain_transcript(st.session_state.display_messages)
-                    st.session_state.instructor_summary = summary
-                    send_session_summary_email(
-                        st.session_state.student_name, summary, transcript
-                    )
-                    st.session_state.case_submitted = True
-                st.rerun()
-    else:
-        sg_key, _, _ = get_email_config()
-        if sg_key:
-            st.success(
-                "✅ Case submitted. Your instructor has been notified with a "
-                "summary of this session. You may close this window."
-            )
-        else:
-            st.success(
-                "✅ Case submitted. You may close this window."
-            )
+    student_turns = [m for m in st.session_state.display_messages if m["role"] == "user"]
+    if student_turns:
+        if st.button("✅ Submit & finish case", type="primary"):
+            with st.spinner("Generating your performance summary..."):
+                raw_summary = get_instructor_summary(
+                    anthropic_client, st.session_state.messages
+                )
+                summary = parse_instructor_summary(raw_summary)
+                st.session_state.instructor_summary = summary
+            st.success("✅ Case submitted. You may close this window.")
+            st.rerun()
 
 
 if __name__ == "__main__":
