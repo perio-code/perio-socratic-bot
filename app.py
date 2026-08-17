@@ -11,26 +11,40 @@ The faculty member's questions are read aloud in a natural voice using
 OpenAI's text-to-speech API (falls back to the browser's built-in
 speech synthesis if no OpenAI key is configured).
 
-ENV VARS REQUIRED (set as Streamlit secrets or environment variables):
+The instructor receives an email notification (via SendGrid) when a student
+starts a session and again when they submit/finish, with an AI-generated
+performance summary.
+
+ENV VARS / STREAMLIT SECRETS REQUIRED:
     ANTHROPIC_API_KEY   - required, powers the Socratic faculty logic
     OPENAI_API_KEY      - optional, enables natural AI voice (TTS)
-                           if absent, app falls back to free browser TTS
+    SENDGRID_API_KEY    - optional, enables email notifications to instructor
+    INSTRUCTOR_EMAIL    - required if SendGrid is enabled (your email address)
+    INSTRUCTOR_PIN      - optional, overrides default PIN for Instructor View
+    FROM_EMAIL          - optional, sender address for notifications
+                          (must be verified in your SendGrid account;
+                           defaults to INSTRUCTOR_EMAIL if not set)
 
 Run locally:
-    pip install streamlit anthropic openai
+    pip install streamlit anthropic openai sendgrid
     streamlit run app.py
 
 Deploy on Streamlit Community Cloud:
     1. Push this file + requirements.txt to your GitHub repo
     2. On share.streamlit.io, create a new app pointing at app.py
     3. In "Secrets", add:
-         ANTHROPIC_API_KEY = "sk-ant-..."
-         OPENAI_API_KEY = "sk-..."     # optional
+         ANTHROPIC_API_KEY  = "sk-ant-..."
+         OPENAI_API_KEY     = "sk-..."          # optional
+         SENDGRID_API_KEY   = "SG...."          # optional
+         INSTRUCTOR_EMAIL   = "you@dental.edu"  # required for email
+         INSTRUCTOR_PIN     = "your-pin"        # optional, default 1234
+         FROM_EMAIL         = "perio-app@dental.edu"  # optional
 """
 
 import base64
 import os
 import re
+from datetime import datetime
 
 import streamlit as st
 from anthropic import Anthropic
@@ -41,6 +55,14 @@ try:
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
+
+# Optional import — app still runs (without email notifications) without it
+try:
+    from sendgrid import SendGridAPIClient
+    from sendgrid.helpers.mail import Mail, Content
+    SENDGRID_AVAILABLE = True
+except ImportError:
+    SENDGRID_AVAILABLE = False
 
 
 # =========================================================================
@@ -268,6 +290,205 @@ def get_instructor_pin():
     return st.secrets.get(
         "INSTRUCTOR_PIN", os.environ.get("INSTRUCTOR_PIN", DEFAULT_INSTRUCTOR_PIN)
     )
+
+
+def get_email_config():
+    """
+    Returns (sendgrid_key, instructor_email, from_email) or (None, None, None)
+    if email notifications are not configured.
+    """
+    sg_key = st.secrets.get("SENDGRID_API_KEY", os.environ.get("SENDGRID_API_KEY"))
+    to_email = st.secrets.get("INSTRUCTOR_EMAIL", os.environ.get("INSTRUCTOR_EMAIL"))
+    from_email = st.secrets.get(
+        "FROM_EMAIL", os.environ.get("FROM_EMAIL", to_email)
+    )
+    if not SENDGRID_AVAILABLE or not sg_key or not to_email:
+        return None, None, None
+    return sg_key, to_email, from_email
+
+
+def send_email(subject, body_html, body_text=None):
+    """
+    Sends an email to the instructor via SendGrid.
+    Silently no-ops if SendGrid is not configured so the app never crashes
+    due to a missing notification setup.
+    Returns True on success, False on failure.
+    """
+    sg_key, to_email, from_email = get_email_config()
+    if not sg_key:
+        return False
+    try:
+        message = Mail(
+            from_email=from_email,
+            to_emails=to_email,
+            subject=subject,
+            html_content=body_html,
+        )
+        sg = SendGridAPIClient(sg_key)
+        sg.send(message)
+        return True
+    except Exception as e:
+        # Don't crash the app over a failed notification
+        print(f"SendGrid error (non-fatal): {e}")
+        return False
+
+
+def send_session_start_email(student_name):
+    """Fires when a student starts a new session."""
+    now = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+    subject = f"🦷 Perio App — {student_name} started a case session"
+    body = f"""
+    <h2>Session Started</h2>
+    <p><strong>Student:</strong> {student_name}</p>
+    <p><strong>Time:</strong> {now}</p>
+    <p>This student has just opened the Periodontal Case Analysis app and
+    begun a new Socratic case session. You will receive a second email with
+    their performance summary when they finish and submit.</p>
+    <hr>
+    <p style="color:gray;font-size:12px;">
+    Periodontal Case Analysis App — Automated Instructor Notification
+    </p>
+    """
+    send_email(subject, body)
+
+
+def send_session_summary_email(student_name, summary_dict, transcript_text):
+    """Fires when the student clicks Submit & Finish, with the full AI summary."""
+    now = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+    s = summary_dict
+    status = s.get("STATUS", "UNKNOWN")
+    emoji_map = {
+        "ON_TRACK": "🟢", "NEEDS_HELP": "🟡",
+        "OFF_TASK": "🔴", "INSUFFICIENT_DATA": "⚪",
+    }
+    emoji = emoji_map.get(status, "⚪")
+    subject = f"🦷 Perio App — {student_name} session summary ({emoji} {status.replace('_', ' ').title()})"
+    body = f"""
+    <h2>Session Summary — {student_name}</h2>
+    <p><strong>Submitted:</strong> {now}</p>
+    <table style="border-collapse:collapse;width:100%;font-family:sans-serif;">
+      <tr style="background:#f0f0f0;">
+        <td style="padding:8px;font-weight:bold;width:160px;">Overall Status</td>
+        <td style="padding:8px;">{emoji} <strong>{status.replace("_", " ").title()}</strong></td>
+      </tr>
+      <tr>
+        <td style="padding:8px;font-weight:bold;">Engagement</td>
+        <td style="padding:8px;">{s.get("ENGAGEMENT", "—")}</td>
+      </tr>
+      <tr style="background:#f9f9f9;">
+        <td style="padding:8px;font-weight:bold;">Comprehension</td>
+        <td style="padding:8px;">{s.get("COMPREHENSION", "—")}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px;font-weight:bold;">Strengths</td>
+        <td style="padding:8px;">{s.get("STRENGTHS", "—")}</td>
+      </tr>
+      <tr style="background:#f9f9f9;">
+        <td style="padding:8px;font-weight:bold;">Gaps</td>
+        <td style="padding:8px;">{s.get("GAPS", "—")}</td>
+      </tr>
+      <tr>
+        <td style="padding:8px;font-weight:bold;">Recommendation</td>
+        <td style="padding:8px;">{s.get("RECOMMENDATION", "—")}</td>
+      </tr>
+    </table>
+    <h3>Full Transcript</h3>
+    <pre style="background:#f5f5f5;padding:12px;font-size:13px;
+                white-space:pre-wrap;border-radius:4px;">{transcript_text}</pre>
+    <hr>
+    <p style="color:gray;font-size:12px;">
+    Periodontal Case Analysis App — Automated Instructor Notification
+    </p>
+    """
+    send_email(subject, body)
+
+
+def build_plain_transcript(display_messages):
+    """Builds a readable plain-text transcript from display_messages."""
+    lines = []
+    for m in display_messages:
+        role = "FACULTY" if m["role"] == "assistant" else "STUDENT"
+        lines.append(f"[{role}]\n{m['content']}\n")
+    return "\n".join(lines)
+
+
+LIFELINE_SYSTEM_PROMPT = """You are generating a multiple-choice lifeline question to help a dental student who is stuck during a Socratic periodontal case analysis exercise.
+
+Your job: given the conversation so far, identify the specific clinical concept the student is struggling with, then generate exactly 5 answer choices — one clearly correct, four plausible but incorrect distractors. The choices should be specific and clinically meaningful (not vague), appropriate for a dental student at the D2/D3 level, and relevant to the exact question the faculty most recently asked.
+
+Respond ONLY in this exact JSON format, with no preamble, no markdown, no backticks:
+{
+  "question": "One short, clear question summarizing what the student needs to answer (max 20 words)",
+  "options": [
+    "Option A text",
+    "Option B text",
+    "Option C text",
+    "Option D text",
+    "Option E text"
+  ],
+  "correct_index": 0
+}
+
+correct_index is the 0-based index of the correct answer among the 5 options. Randomize where the correct answer falls — don't always put it first.
+"""
+
+
+def get_lifeline_options(client, messages):
+    """
+    Calls Claude with a separate prompt to generate 5 contextual MC options
+    for wherever the student is currently stuck. Returns a dict with
+    'question', 'options' (list of 5), and 'correct_index', or None on failure.
+    """
+    try:
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=400,
+            system=LIFELINE_SYSTEM_PROMPT,
+            messages=messages + [{
+                "role": "user",
+                "content": (
+                    "The student has now struggled with this question twice. "
+                    "Generate a 5-option multiple choice lifeline question covering "
+                    "the concept they are stuck on, in the exact JSON format specified."
+                )
+            }],
+        )
+        raw = response.content[0].text.strip()
+        # Strip any accidental markdown fences
+        raw = re.sub(r"^```[a-z]*\n?", "", raw)
+        raw = re.sub(r"\n?```$", "", raw)
+        import json
+        data = json.loads(raw)
+        # Validate structure
+        if (
+            isinstance(data.get("options"), list)
+            and len(data["options"]) == 5
+            and isinstance(data.get("correct_index"), int)
+            and 0 <= data["correct_index"] <= 4
+            and isinstance(data.get("question"), str)
+        ):
+            return data
+        return None
+    except Exception as e:
+        print(f"Lifeline generation error (non-fatal): {e}")
+        return None
+
+
+def is_response_struggling(raw_reply_text):
+    """
+    Heuristic: did the faculty's reply indicate the student got it wrong or
+    incomplete? Looks for Socratic correction language in the reply.
+    Returns True if the student appears to have struggled.
+    """
+    correction_signals = [
+        "let's look", "look back", "think about", "reconsider",
+        "not quite", "let me redirect", "review", "check again",
+        "walk me through", "what does the literature", "look more carefully",
+        "let's revisit", "that's not", "incorrect", "look at this",
+        "examine", "re-examine", "go back", "try again",
+    ]
+    lower = raw_reply_text.lower()
+    return any(signal in lower for signal in correction_signals)
 
 
 # =========================================================================
@@ -504,6 +725,8 @@ def main():
     st.set_page_config(page_title="Perio Clinic Faculty", page_icon="🦷", layout="centered")
 
     st.title("🦷 Periodontal Case Analysis")
+    if st.session_state.get("student_name"):
+        st.markdown(f"**Student:** {st.session_state.student_name}")
 
     st.warning(
         "⚠️ **For educational purposes only.** This tool is designed to help "
@@ -523,14 +746,8 @@ def main():
     openai_client = get_openai_client()
 
     # ---------------------------------------------------------------
-    # Session state init
+    # Session state init — MUST come before any UI or state reads
     # ---------------------------------------------------------------
-    # Each key is initialized independently with setdefault, rather than
-    # gated behind a single "if 'messages' not in state" check. This makes
-    # the app resilient to stale sessions left over from an older deployed
-    # version of this code (e.g. right after you push an update that adds
-    # new session keys) — every key gets created if missing, even if some
-    # other keys already existed from before.
     if "messages" not in st.session_state:
         opening_line = (
             "Welcome to the clinic, Doctor. Let's look at your case. "
@@ -546,6 +763,34 @@ def main():
     st.session_state.setdefault("intake_data", None)
     st.session_state.setdefault("instructor_unlocked", False)
     st.session_state.setdefault("instructor_summary", None)
+    st.session_state.setdefault("student_name", None)
+    st.session_state.setdefault("session_start_email_sent", False)
+    st.session_state.setdefault("case_submitted", False)
+    st.session_state.setdefault("strike_count", 0)       # wrong/incomplete answers in current phase
+    st.session_state.setdefault("lifeline_options", None) # MC options currently shown
+    st.session_state.setdefault("session_start_time", datetime.now().isoformat())
+
+    # ---------------------------------------------------------------
+    # Student name capture — shown once at the very start
+    # ---------------------------------------------------------------
+    if not st.session_state.student_name:
+        st.subheader("Before we begin")
+        st.markdown("Please enter your name so your instructor can identify your session.")
+        with st.form("name_form"):
+            name_input = st.text_input("Your full name", placeholder="e.g. Jane Smith")
+            start = st.form_submit_button("Start case session")
+            if start:
+                if name_input.strip():
+                    st.session_state.student_name = name_input.strip()
+                    st.rerun()
+                else:
+                    st.error("Please enter your name to continue.")
+        st.stop()
+
+    # Send session-start email once, the first time we have a student name
+    if st.session_state.student_name and not st.session_state.session_start_email_sent:
+        send_session_start_email(st.session_state.student_name)
+        st.session_state.session_start_email_sent = True
 
     # ---------------------------------------------------------------
     # Sidebar: settings + phase checklist
@@ -567,6 +812,27 @@ def main():
 
         st.divider()
         st.header("Case Checklist")
+
+        # Session timer
+        elapsed = datetime.now() - datetime.fromisoformat(
+            st.session_state.session_start_time
+        )
+        elapsed_min = int(elapsed.total_seconds() // 60)
+        elapsed_sec = int(elapsed.total_seconds() % 60)
+        remaining = max(0, 30 * 60 - int(elapsed.total_seconds()))
+        rem_min = remaining // 60
+        rem_sec = remaining % 60
+        if remaining > 5 * 60:
+            timer_icon = "⏱️"
+        elif remaining > 0:
+            timer_icon = "⚠️"
+        else:
+            timer_icon = "🔴"
+        st.markdown(
+            f"{timer_icon} **Time:** {elapsed_min}m {elapsed_sec:02d}s elapsed &nbsp;|&nbsp; "
+            f"**{rem_min}m {rem_sec:02d}s remaining**"
+        )
+
         current = st.session_state.current_phase
         for n, label in PHASE_LABELS.items():
             if n < current:
@@ -683,6 +949,33 @@ def main():
     # ---------------------------------------------------------------
     pending_text = st.session_state.pop("_pending_submit", None)
 
+    # ---------------------------------------------------------------
+    # Lifeline multiple choice widget (appears after 2 strikes)
+    # ---------------------------------------------------------------
+    if st.session_state.lifeline_options:
+        opts = st.session_state.lifeline_options
+        st.info(
+            "💡 **Lifeline available** — you've had a couple of tries on this "
+            "question. You can select an answer below to get unstuck, or keep "
+            "typing your own response above.",
+            icon="💡",
+        )
+        st.markdown(f"**{opts['question']}**")
+        cols = st.columns(1)
+        for i, option_text in enumerate(opts["options"]):
+            label = f"{chr(65+i)}. {option_text}"
+            if st.button(label, key=f"lifeline_{i}"):
+                chosen = option_text
+                correct = opts["options"][opts["correct_index"]]
+                is_correct = (i == opts["correct_index"])
+                submission = (
+                    f"[Lifeline selected] {chr(65+i)}. {chosen}"
+                )
+                st.session_state.lifeline_options = None
+                st.session_state.strike_count = 0
+                st.session_state._pending_submit = submission
+                st.rerun()
+
     # Chat input
     user_input = st.chat_input("Present your case findings or respond to the question above...")
 
@@ -710,8 +1003,34 @@ def main():
         st.session_state.messages.append({"role": "assistant", "content": raw_reply})
         st.session_state.display_messages.append({"role": "assistant", "content": clean_reply})
 
-        if phase:
+        # Phase advance — reset strikes and clear any active lifeline
+        if phase and phase != st.session_state.current_phase:
             st.session_state.current_phase = phase
+            st.session_state.strike_count = 0
+            st.session_state.lifeline_options = None
+        elif phase:
+            st.session_state.current_phase = phase
+
+        # Strike detection — only if no lifeline was just used
+        if not final_input.startswith("[Lifeline selected]"):
+            if is_response_struggling(clean_reply):
+                st.session_state.strike_count += 1
+            else:
+                # Correct/complete answer — reset
+                st.session_state.strike_count = 0
+                st.session_state.lifeline_options = None
+
+            # Trigger lifeline after 2 strikes if not already showing one
+            if (
+                st.session_state.strike_count >= 2
+                and st.session_state.lifeline_options is None
+            ):
+                with st.spinner("Preparing a lifeline question..."):
+                    lifeline = get_lifeline_options(
+                        anthropic_client, st.session_state.messages
+                    )
+                if lifeline:
+                    st.session_state.lifeline_options = lifeline
 
         if voice_enabled:
             speak(clean_reply, openai_client)
@@ -719,6 +1038,38 @@ def main():
             [m for m in st.session_state.display_messages if m["role"] == "assistant"]
         )
         st.rerun()
+
+    # ---------------------------------------------------------------
+    # Submit & Finish — generates summary and emails instructor
+    # ---------------------------------------------------------------
+    st.divider()
+    if not st.session_state.case_submitted:
+        student_turns = [m for m in st.session_state.display_messages if m["role"] == "user"]
+        if student_turns:
+            if st.button("✅ Submit & finish case", type="primary"):
+                with st.spinner("Generating your performance summary and notifying instructor..."):
+                    raw_summary = get_instructor_summary(
+                        anthropic_client, st.session_state.messages
+                    )
+                    summary = parse_instructor_summary(raw_summary)
+                    transcript = build_plain_transcript(st.session_state.display_messages)
+                    st.session_state.instructor_summary = summary
+                    send_session_summary_email(
+                        st.session_state.student_name, summary, transcript
+                    )
+                    st.session_state.case_submitted = True
+                st.rerun()
+    else:
+        sg_key, _, _ = get_email_config()
+        if sg_key:
+            st.success(
+                "✅ Case submitted. Your instructor has been notified with a "
+                "summary of this session. You may close this window."
+            )
+        else:
+            st.success(
+                "✅ Case submitted. You may close this window."
+            )
 
 
 if __name__ == "__main__":
